@@ -1190,7 +1190,14 @@ client.on('interactionCreate', async interaction => {
 
 async function handleLfgCommand(interaction) {
     // Defer reply immediately to prevent timeout issues
-    await interaction.deferReply();
+    try {
+        await interaction.deferReply();
+        // Add small delay to ensure defer is processed
+        await new Promise(resolve => setTimeout(resolve, 100));
+    } catch (deferError) {
+        console.error('Error deferring interaction:', deferError);
+        return;
+    }
     
     const game = interaction.options.getString('game');
     const gamemode = interaction.options.getString('gamemode');
@@ -1643,15 +1650,22 @@ async function handleSetChannelCommand(interaction) {
     
     
     // Initialize guild settings if not exists
-    if (!guildSettings.has(guildId)) {
-        guildSettings.set(guildId, {});
+    if (!guildSettingsCache.has(guildId)) {
+        guildSettingsCache.set(guildId, {});
     }
     
     // Set the LFG channel
-    const settings = guildSettings.get(guildId);
+    const settings = guildSettingsCache.get(guildId);
     settings.lfgChannel = channel.id;
-    guildSettings.set(guildId, settings); // Make sure to set it back
+    guildSettingsCache.set(guildId, settings);
     
+    // Also save to database
+    try {
+        await storage.updateGuildSettings(guildId, { lfgChannel: channel.id });
+        console.log(`💾 Updated LFG channel for guild ${guildId} in database`);
+    } catch (dbError) {
+        console.error('Error saving guild settings to database:', dbError);
+    }
     
     const embed = new EmbedBuilder()
         .setColor(0x00ff00)
