@@ -62,7 +62,7 @@ if (missingEnvVars.length > 0) {
     process.exit(1);
 }
 
-// Database setup
+// Database setup with Render-specific optimizations
 // Clean up DATABASE_URL if it contains the psql command prefix
 let connectionString = process.env.DATABASE_URL;
 if (connectionString.startsWith('psql ')) {
@@ -73,16 +73,23 @@ if (connectionString.startsWith('psql ')) {
     }
 }
 
+// Ensure URL params for Render/Neon compatibility
+if (connectionString && !connectionString.includes('sslmode')) {
+    connectionString += connectionString.includes('?') ? '&sslmode=require' : '?sslmode=require';
+}
+
 const pool = new Pool({ 
     connectionString,
     // Production-optimized connection pool for Render hosting
-    max: 10,                      // Maximum connections
-    min: 2,                       // Minimum connections to keep alive
+    max: 5,                       // Reduced for Render hosting limits
+    min: 1,                       // Minimum connections to keep alive
     idleTimeoutMillis: 30000,     // Close idle connections after 30s
-    connectionTimeoutMillis: 10000, // 10s timeout for new connections
-    acquireTimeoutMillis: 8000,   // 8s timeout for acquiring from pool
-    createTimeoutMillis: 10000,   // 10s timeout for creating new connections
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    connectionTimeoutMillis: 15000, // Increased timeout for Render
+    acquireTimeoutMillis: 10000,  // 10s timeout for acquiring from pool
+    createTimeoutMillis: 15000,   // Increased timeout for creating new connections
+    ssl: { rejectUnauthorized: false }, // Always use SSL for production databases
+    keepAlive: true,              // Keep connections alive
+    keepAliveInitialDelayMillis: 10000 // Initial delay for keep-alive
 });
 
 // Database schema definitions
@@ -126,11 +133,11 @@ const db = drizzle(pool, {
 });
 
 // Auto-create tables on startup for deployment environments
-async function ensureDatabaseTables() {
+async function ensureDatabaseTables(retryCount = 0) {
     try {
         console.log('🔧 Checking database connection and tables...');
         
-        // Test database connection first
+        // Test database connection first with retry logic
         await pool.query('SELECT 1');
         console.log('✅ Database connection verified');
         
@@ -180,6 +187,14 @@ async function ensureDatabaseTables() {
     } catch (error) {
         console.error('❌ Database setup failed:', error);
         console.error('🔍 Check your DATABASE_URL environment variable');
+        
+        // Retry logic for Render hosting (connection issues are common during startup)
+        if (retryCount < 5 && (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.message.includes('terminating'))) {
+            console.log(`🔄 Retrying database setup (attempt ${retryCount + 1}/5) in 3 seconds...`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            return ensureDatabaseTables(retryCount + 1);
+        }
+        
         throw error;
     }
 }
@@ -3553,19 +3568,38 @@ async function handleQuickJoinCommand(interaction) {
     }
 }
 
-// Initialize bot with proper error handling
+// Initialize bot with proper error handling for Render hosting
 async function startBot() {
     try {
         // Ensure database is ready before starting Discord client
         await ensureDatabaseTables();
         
-        // Start Discord client
+        // Start Discord client with production-grade error handling
+        console.log('🔌 Connecting to Discord...');
         await client.login(process.env.DISCORD_TOKEN);
         console.log('🎉 Bot initialization completed successfully!');
         
     } catch (error) {
         console.error('❌ Failed to start bot:', error);
-        console.error('🔄 Shutting down...');
+        console.error('🔍 Check your environment variables:');
+        console.error('  - DISCORD_TOKEN (bot token)');
+        console.error('  - DATABASE_URL (PostgreSQL connection)');
+        console.error('🔄 Attempting graceful shutdown...');
+        
+        // Attempt to close any open connections before exit
+        try {
+            if (pool) {
+                console.log('🗃️ Closing database pool...');
+                await pool.end();
+            }
+            if (server) {
+                console.log('🌐 Closing HTTP server...');
+                server.close();
+            }
+        } catch (cleanupError) {
+            console.error('Error during cleanup:', cleanupError);
+        }
+        
         process.exit(1);
     }
 }
